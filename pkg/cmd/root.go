@@ -67,7 +67,7 @@ func initConfig() {
 	}
 
 	s.RootPath = path
-	s.DB.DataType = os.Getenv("DATABASE_TYPE")
+	s.DB.DBType = os.Getenv("DATABASE_TYPE")
 }
 
 func exitGracefully(err error, msg ...string) {

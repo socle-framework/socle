@@ -2,43 +2,45 @@ package socle
 
 import (
 	"database/sql"
-	"log"
+
+	"github.com/alexedwards/scs/v2"
+	"github.com/go-chi/chi/v5"
+	"github.com/robfig/cron/v3"
+	"github.com/socle-framework/cache"
+	"github.com/socle-framework/filesystems"
+	"github.com/socle-framework/mailer"
+	"github.com/socle-framework/render"
+	"github.com/socle-framework/socle/pkg/auth"
+	"github.com/socle-framework/socle/pkg/ratelimiter"
 )
 
-// initPaths is used when initializing the application. It holds the root
-// path for the application, and a slice of strings with the names of
-// folders that the application expects to find.
-type initPaths struct {
-	rootPath            string
-	rootFolderNames     []string
-	cmdFolderNames      []string
-	internalFolderNames []string
-	varFolderNames      []string
-}
-
-// cookieConfig holds cookie config values
-type cookieConfig struct {
-	name     string
-	lifetime string
-	persist  string
-	secure   string
-	domain   string
-}
-
-type databaseConfig struct {
-	dsn      string
-	database string
+// Socle is the overall type for the Socle package. Members that are exported in this type
+// are available to any application that uses it.
+type Socle struct {
+	env           envConfig
+	cmd           string
+	AppName       string
+	Version       string
+	Debug         bool
+	RootPath      string
+	Log           Logger
+	Routes        *chi.Mux
+	Render        *render.Render
+	Session       *scs.SessionManager
+	EncryptionKey string
+	Cache         cache.Cache
+	DB            Database
+	authenticator *auth.Authenticator
+	Server        Server
+	Scheduler     *cron.Cron
+	Mail          mailer.Mail
+	FileSystem    filesystems.FS
+	rateLimiter   *ratelimiter.Limiter
 }
 
 type Database struct {
-	DataType string
-	Pool     *sql.DB
-}
-
-type redisConfig struct {
-	host     string
-	password string
-	prefix   string
+	DBType string
+	Pool   *sql.DB
 }
 
 type Server struct {
@@ -46,24 +48,4 @@ type Server struct {
 	Port       string
 	Secure     bool
 	URL        string
-}
-
-type Logger struct {
-	ErrorLog *log.Logger
-	InfoLog  *log.Logger
-}
-
-type config struct {
-	port        string
-	renderer    string
-	cookie      cookieConfig
-	sessionType string
-	database    databaseConfig
-	redis       redisConfig
-	uploads     uploadConfig
-}
-
-type uploadConfig struct {
-	allowedMimeTypes []string
-	maxUploadSize    int64
 }

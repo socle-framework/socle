@@ -7,10 +7,10 @@ import (
 	"time"
 )
 
-func (c *Socle) ListenAndServe() error {
-	log.Printf("WEB is listening on port  %v", os.Getenv("WEB_URL"))
+func (c *Socle) ListenAndServe(addr string) error {
+	log.Printf("App start with url  %v", addr)
 	srv := &http.Server{
-		Addr:         os.Getenv("WEB_URL"),
+		Addr:         addr,
 		ErrorLog:     c.Log.ErrorLog,
 		Handler:      c.Routes,
 		IdleTimeout:  30 * time.Second,

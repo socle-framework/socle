@@ -6,313 +6,182 @@ import (
 	"net"
 	"net/rpc"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
-	"github.com/alexedwards/scs/v2"
 	"github.com/dgraph-io/badger/v3"
 	"github.com/go-chi/chi/v5"
 	"github.com/gomodule/redigo/redis"
-	"github.com/joho/godotenv"
 	"github.com/robfig/cron/v3"
 	"github.com/socle-framework/cache"
-	"github.com/socle-framework/filesystems"
 	"github.com/socle-framework/mailer"
 	"github.com/socle-framework/render"
 	"github.com/socle-framework/session"
+	"github.com/socle-framework/socle/pkg/env"
 )
 
-const version = "0.0.1"
+const version = "0.1.2"
 
-var myRedisCache *cache.RedisCache
-var myBadgerCache *cache.BadgerCache
+var redisCache *cache.RedisCache
+var badgerCache *cache.BadgerCache
 var redisPool *redis.Pool
 var badgerConn *badger.DB
 var maintenanceMode bool
 
-// Socle is the overall type for the Socle package. Members that are exported in this type
-// are available to any application that uses it.
-type Socle struct {
-	config        config
-	AppName       string
-	Version       string
-	Debug         bool
-	RootPath      string
-	Log           Logger
-	Routes        *chi.Mux
-	Render        *render.Render
-	Session       *scs.SessionManager
-	EncryptionKey string
-	Cache         cache.Cache
-	DB            Database
-	Server        Server
-	Scheduler     *cron.Cron
-	Mail          mailer.Mail
-	FileSystem    filesystems.FS
-}
-
 // New reads the .env file, creates our application config, populates the Socle type with settings
 // based on .env values, and creates necessary folders and files if they don't exist
-func (c *Socle) New(rootPath string, cmds []string) error {
-	pathConfig := initPaths{
-		rootPath:            rootPath,
-		cmdFolderNames:      cmds,
-		rootFolderNames:     []string{"bin", "cmd", "config", "internal", "pkg", "public", "screenshots", "var"},
-		internalFolderNames: []string{"migration", "model", "service", "store", "usecase"},
-		varFolderNames:      []string{"log", "tmp"},
-	}
-
-	err := c.Init(pathConfig)
+func (s *Socle) New(rootPath, cmd string) error {
+	s.cmd = cmd
+	// Load .env
+	err := env.Load(rootPath)
 	if err != nil {
 		return err
 	}
-
-	err = c.checkDotEnv(rootPath)
-	if err != nil {
-		return err
-	}
-
-	// read .env
-	err = godotenv.Load(rootPath + "/.env")
-	if err != nil {
-		return err
-	}
+	s.env = initEnvConfig()
+	s.Debug = s.env.debug
+	s.EncryptionKey = s.env.encryptionKey
+	s.Version = version
+	s.RootPath = rootPath
 
 	// create loggers
-	infoLog, errorLog := c.startLoggers()
+	err = s.initLoggers()
+	if err != nil {
+		return err
+	}
+
+	// init router
+	err = s.initRouter()
+	if err != nil {
+		return err
+	}
 
 	// connect to database
-	if os.Getenv("DATABASE_TYPE") != "" {
-		db, err := c.OpenDB(os.Getenv("DATABASE_TYPE"), c.BuildDSN())
+	err = s.initDB()
+	if err != nil {
+		return err
+	}
+
+	// config scheduler
+	err = s.initScheduler()
+	if err != nil {
+		return err
+	}
+
+	// cache setting
+	err = s.initCache()
+	if err != nil {
+		return err
+	}
+
+	// init server
+	err = s.initServer()
+	if err != nil {
+		return err
+	}
+
+	// create session
+	err = s.InitSession()
+	if err != nil {
+		return err
+	}
+
+	//init render
+	err = s.initRenderer()
+	if err != nil {
+		return err
+	}
+
+	// init Mailer
+	err = s.initMailer()
+	if err != nil {
+		return err
+	}
+	go s.Mail.ListenForMail()
+
+	return nil
+}
+
+func (s *Socle) initLoggers() error {
+	s.Log.InfoLog = log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime)
+	s.Log.ErrorLog = log.New(os.Stdout, "ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
+	return nil
+}
+
+func (s *Socle) initRouter() error {
+	if !InArrayStr(s.cmd, []string{"web", "api"}) {
+		return nil
+	}
+	s.Routes = s.routes().(*chi.Mux)
+	return nil
+}
+
+func (s *Socle) initDB() error {
+	if s.env.db.dbType != "" {
+		db, err := s.OpenDB(s.env.db.dbType, s.BuildDSN())
 		if err != nil {
-			errorLog.Println(err)
-			os.Exit(1)
+			s.Log.ErrorLog.Println(err)
+			return err
 		}
-		c.DB = Database{
-			DataType: os.Getenv("DATABASE_TYPE"),
-			Pool:     db,
+		s.DB = Database{
+			DBType: s.env.db.dbType,
+			Pool:   db,
 		}
 	}
 
-	scheduler := cron.New()
-	c.Scheduler = scheduler
+	return nil
+}
 
-	if os.Getenv("CACHE") == "redis" || os.Getenv("SESSION_TYPE") == "redis" {
-		myRedisCache = c.createClientRedisCache()
-		c.Cache = myRedisCache
-		redisPool = myRedisCache.Conn
+func (s *Socle) initScheduler() error {
+	s.Scheduler = cron.New()
+	return nil
+}
+
+func (s *Socle) initCache() error {
+	if s.env.cache == "redis" || s.env.sessionType == "redis" {
+		redisCache = s.createClientRedisCache()
+		s.Cache = redisCache
+		redisPool = redisCache.Conn
 	}
 
-	if os.Getenv("CACHE") == "badger" {
-		myBadgerCache = c.createClientBadgerCache()
-		c.Cache = myBadgerCache
-		badgerConn = myBadgerCache.Conn
+	if s.env.cache == "badger" {
+		badgerCache = s.createClientBadgerCache()
+		s.Cache = badgerCache
+		badgerConn = badgerCache.Conn
 
-		_, err = c.Scheduler.AddFunc("@daily", func() {
-			_ = myBadgerCache.Conn.RunValueLogGC(0.7)
+		_, err := s.Scheduler.AddFunc("@daily", func() {
+			_ = badgerCache.Conn.RunValueLogGC(0.7)
 		})
 		if err != nil {
 			return err
 		}
 	}
 
-	c.Log.InfoLog = infoLog
-	c.Log.ErrorLog = errorLog
-	c.Debug, _ = strconv.ParseBool(os.Getenv("DEBUG"))
-	c.Version = version
-	c.RootPath = rootPath
-	c.Mail = c.createMailer()
-	c.Routes = c.routes().(*chi.Mux)
-
-	// file uploads
-	exploded := strings.Split(os.Getenv("ALLOWED_FILETYPES"), ",")
-	var mimeTypes []string
-	for _, m := range exploded {
-		mimeTypes = append(mimeTypes, m)
-	}
-
-	var maxUploadSize int64
-	if max, err := strconv.Atoi(os.Getenv("MAX_UPLOAD_SIZE")); err != nil {
-		maxUploadSize = 10 << 20
-	} else {
-		maxUploadSize = int64(max)
-	}
-
-	c.config = config{
-		port:     os.Getenv("PORT"),
-		renderer: os.Getenv("RENDERER"),
-		cookie: cookieConfig{
-			name:     os.Getenv("COOKIE_NAME"),
-			lifetime: os.Getenv("COOKIE_LIFETIME"),
-			persist:  os.Getenv("COOKIE_PERSISTS"),
-			secure:   os.Getenv("COOKIE_SECURE"),
-			domain:   os.Getenv("COOKIE_DOMAIN"),
-		},
-		sessionType: os.Getenv("SESSION_TYPE"),
-		database: databaseConfig{
-			database: os.Getenv("DATABASE_TYPE"),
-			dsn:      c.BuildDSN(),
-		},
-		redis: redisConfig{
-			host:     os.Getenv("REDIS_HOST"),
-			password: os.Getenv("REDIS_PASSWORD"),
-			prefix:   os.Getenv("REDIS_PREFIX"),
-		},
-		uploads: uploadConfig{
-			maxUploadSize:    maxUploadSize,
-			allowedMimeTypes: mimeTypes,
-		},
-	}
-
-	secure := true
-	if strings.ToLower(os.Getenv("SECURE")) == "false" {
-		secure = false
-	}
-
-	c.Server = Server{
-		ServerName: os.Getenv("SERVER_NAME"),
-		Port:       os.Getenv("PORT"),
-		Secure:     secure,
-		URL:        os.Getenv("APP_URL"),
-	}
-
-	// create session
-
-	sess := session.Session{
-		CookieLifetime: c.config.cookie.lifetime,
-		CookiePersist:  c.config.cookie.persist,
-		CookieName:     c.config.cookie.name,
-		SessionType:    c.config.sessionType,
-		CookieDomain:   c.config.cookie.domain,
-	}
-
-	switch c.config.sessionType {
-	case "redis":
-		sess.RedisPool = myRedisCache.Conn
-	case "mysql", "postgres", "mariadb", "postgresql":
-		sess.DBPool = c.DB.Pool
-	}
-
-	c.Session = sess.InitSession()
-	c.EncryptionKey = os.Getenv("KEY")
-
-	c.createRenderer()
-	go c.Mail.ListenForMail()
-
 	return nil
 }
 
-// Init creates necessary folders for our Socle application
-func (c *Socle) Init(p initPaths) error {
-	root := p.rootPath
-	for _, path := range p.rootFolderNames {
-		// create folder if it doesn't exist
-		err := c.CreateDirIfNotExist(root + "/" + path)
-		if err != nil {
-			return err
-		}
-	}
-
-	for _, path := range p.cmdFolderNames {
-		// create folder if it doesn't exist
-		err := c.CreateDirIfNotExist(root + "/cmd/" + path)
-		if err != nil {
-			return err
-		}
-	}
-
-	for _, path := range p.internalFolderNames {
-		// create folder if it doesn't exist
-		err := c.CreateDirIfNotExist(root + "/internal/" + path)
-		if err != nil {
-			return err
-		}
-	}
-
-	for _, path := range p.varFolderNames {
-		// create folder if it doesn't exist
-		err := c.CreateDirIfNotExist(root + "/var/" + path)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (c *Socle) checkDotEnv(path string) error {
-	err := c.CreateFileIfNotExists(fmt.Sprintf("%s/.env", path))
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (c *Socle) startLoggers() (*log.Logger, *log.Logger) {
-	var infoLog *log.Logger
-	var errorLog *log.Logger
-
-	infoLog = log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime)
-	errorLog = log.New(os.Stdout, "ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
-
-	return infoLog, errorLog
-}
-
-func (c *Socle) createRenderer() {
-	myRenderer := render.Render{
-		Renderer: c.config.renderer,
-		RootPath: c.RootPath,
-		Port:     c.config.port,
-		Session:  c.Session,
-	}
-	c.Render = &myRenderer
-}
-
-func (c *Socle) createMailer() mailer.Mail {
-	port, _ := strconv.Atoi(os.Getenv("SMTP_PORT"))
-	m := mailer.Mail{
-		Domain:      os.Getenv("MAIL_DOMAIN"),
-		Templates:   c.RootPath + "/mail",
-		Host:        os.Getenv("SMTP_HOST"),
-		Port:        port,
-		Username:    os.Getenv("SMTP_USERNAME"),
-		Password:    os.Getenv("SMTP_PASSWORD"),
-		Encryption:  os.Getenv("SMTP_ENCRYPTION"),
-		FromName:    os.Getenv("FROM_NAME"),
-		FromAddress: os.Getenv("FROM_ADDRESS"),
-		Jobs:        make(chan mailer.Message, 20),
-		Results:     make(chan mailer.Result, 20),
-		API:         os.Getenv("MAILER_API"),
-		APIKey:      os.Getenv("MAILER_KEY"),
-		APIUrl:      os.Getenv("MAILER_URL"),
-	}
-	return m
-}
-
-func (c *Socle) createClientRedisCache() *cache.RedisCache {
+func (s *Socle) createClientRedisCache() *cache.RedisCache {
 	cacheClient := cache.RedisCache{
-		Conn:   c.createRedisPool(),
-		Prefix: c.config.redis.prefix,
+		Conn:   s.createRedisPool(),
+		Prefix: s.env.redis.prefix,
 	}
 	return &cacheClient
 }
 
-func (c *Socle) createClientBadgerCache() *cache.BadgerCache {
+func (s *Socle) createClientBadgerCache() *cache.BadgerCache {
 	cacheClient := cache.BadgerCache{
-		Conn: c.createBadgerConn(),
+		Conn: s.createBadgerConn(),
 	}
 	return &cacheClient
 }
 
-func (c *Socle) createRedisPool() *redis.Pool {
+func (s *Socle) createRedisPool() *redis.Pool {
 	return &redis.Pool{
 		MaxIdle:     50,
 		MaxActive:   10000,
 		IdleTimeout: 240 * time.Second,
 		Dial: func() (redis.Conn, error) {
 			return redis.Dial("tcp",
-				c.config.redis.host,
-				redis.DialPassword(c.config.redis.password))
+				s.env.redis.host,
+				redis.DialPassword(s.env.redis.password))
 		},
 
 		TestOnBorrow: func(conn redis.Conn, t time.Time) error {
@@ -322,47 +191,94 @@ func (c *Socle) createRedisPool() *redis.Pool {
 	}
 }
 
-func (c *Socle) createBadgerConn() *badger.DB {
-	db, err := badger.Open(badger.DefaultOptions(c.RootPath + "/tmp/badger"))
+func (s *Socle) createBadgerConn() *badger.DB {
+	db, err := badger.Open(badger.DefaultOptions(s.RootPath + "/tmp/badger"))
 	if err != nil {
 		return nil
 	}
 	return db
 }
 
-// BuildDSN builds the datasource name for our database, and returns it as a string
-func (c *Socle) BuildDSN() string {
-	var dsn string
-
-	switch os.Getenv("DATABASE_TYPE") {
-	case "postgres", "postgresql":
-		dsn = fmt.Sprintf("host=%s port=%s user=%s dbname=%s sslmode=%s timezone=UTC connect_timeout=5",
-			os.Getenv("DATABASE_HOST"),
-			os.Getenv("DATABASE_PORT"),
-			os.Getenv("DATABASE_USER"),
-			os.Getenv("DATABASE_NAME"),
-			os.Getenv("DATABASE_SSL_MODE"))
-
-		// we check to see if a database password has been supplied, since including "password=" with nothing
-		// after it sometimes causes postgres to fail to allow a connection.
-		if os.Getenv("DATABASE_PASS") != "" {
-			dsn = fmt.Sprintf("%s password=%s", dsn, os.Getenv("DATABASE_PASS"))
-		}
-
-	case "mysql", "mariadb":
-		dsn = fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?collation=utf8_unicode_ci&timeout=5s&parseTime=true&tls=%s&readTimeout=5s",
-			os.Getenv("DATABASE_USER"),
-			os.Getenv("DATABASE_PASS"),
-			os.Getenv("DATABASE_HOST"),
-			os.Getenv("DATABASE_PORT"),
-			os.Getenv("DATABASE_NAME"),
-			os.Getenv("DATABASE_SSL_MODE"))
-
-	default:
-
+func (s *Socle) initMailer() error {
+	s.Mail = mailer.Mail{
+		Domain:      s.env.mail.domain,
+		Templates:   s.RootPath + "/mail",
+		Host:        s.env.mail.smtp.host,
+		Port:        s.env.mail.smtp.port,
+		Username:    s.env.mail.smtp.username,
+		Password:    s.env.mail.smtp.password,
+		Encryption:  s.env.mail.smtp.encryptionKey,
+		FromName:    s.env.mail.fromName,
+		FromAddress: s.env.mail.FromAddress,
+		Jobs:        make(chan mailer.Message, 20),
+		Results:     make(chan mailer.Result, 20),
+		API:         s.env.mail.mailerService.api,
+		APIKey:      s.env.mail.mailerService.key,
+		APIUrl:      s.env.mail.mailerService.url,
 	}
 
-	return dsn
+	return nil
+}
+
+func (s *Socle) initServer() error {
+
+	if !InArrayStr(s.cmd, []string{"web", "api", "rpc"}) {
+		return nil
+	}
+
+	s.Server = Server{
+		ServerName: s.env.serverName,
+		Secure:     s.env.secure,
+	}
+	switch s.cmd {
+	case "api":
+		s.Server.Port = s.env.apiPort
+
+	case "rpc":
+		s.Server.Port = s.env.rpcPort
+	default:
+		s.Server.Port = s.env.webPort
+	}
+	s.Server.URL = fmt.Sprintf("%s:%s", s.env.serverName, s.Server.Port)
+	return nil
+
+}
+
+func (s *Socle) InitSession() error {
+	if s.cmd != "web" {
+		return nil
+	}
+
+	sess := session.Session{
+		CookieLifetime: s.env.cookie.lifetime,
+		CookiePersist:  s.env.cookie.persist,
+		CookieName:     s.env.cookie.name,
+		SessionType:    s.env.sessionType,
+		CookieDomain:   s.env.cookie.domain,
+	}
+
+	switch s.env.sessionType {
+	case "redis":
+		sess.RedisPool = redisCache.Conn
+	case "mysql", "postgres", "mariadb", "postgresql":
+		sess.DBPool = s.DB.Pool
+	}
+
+	s.Session = sess.InitSession()
+	return nil
+}
+
+func (s *Socle) initRenderer() error {
+	if s.cmd != "web" {
+		return nil
+	}
+
+	s.Render = &render.Render{
+		RootPath: s.RootPath,
+		Session:  s.Session,
+	}
+
+	return nil
 }
 
 type RPCServer struct{}
@@ -378,18 +294,18 @@ func (r *RPCServer) MaintenanceMode(inMaintenanceMode bool, resp *string) error 
 	return nil
 }
 
-func (c *Socle) listenRPC() {
+func (s *Socle) listenRPC() {
 	// if nothing specified for rpc port, don't start
 	if os.Getenv("RPC_PORT") != "" {
-		c.Log.InfoLog.Println("Starting RPC server on port", os.Getenv("RPC_PORT"))
+		s.Log.InfoLog.Println("Starting RPC server on port", os.Getenv("RPC_PORT"))
 		err := rpc.Register(new(RPCServer))
 		if err != nil {
-			c.Log.ErrorLog.Println(err)
+			s.Log.ErrorLog.Println(err)
 			return
 		}
 		listen, err := net.Listen("tcp", "127.0.0.1:"+os.Getenv("RPC_PORT"))
 		if err != nil {
-			c.Log.ErrorLog.Println(err)
+			s.Log.ErrorLog.Println(err)
 			return
 		}
 		for {

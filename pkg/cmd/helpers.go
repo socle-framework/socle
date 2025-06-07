@@ -9,7 +9,7 @@ import (
 )
 
 func getDSN() string {
-	dbType := s.DB.DataType
+	dbType := s.DB.DBType
 
 	if dbType == "pgx" {
 		dbType = "postgres"
@@ -39,7 +39,7 @@ func getDSN() string {
 }
 
 func checkForDB() {
-	dbType := s.DB.DataType
+	dbType := s.DB.DBType
 
 	if dbType == "" {
 		exitGracefully(errors.New("no database connection provided in .env"))
