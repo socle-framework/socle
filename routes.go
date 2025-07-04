@@ -7,17 +7,13 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-func (c *Socle) routes() http.Handler {
+func (s *Socle) routes(middlewares []string) http.Handler {
 	mux := chi.NewRouter()
-	mux.Use(middleware.RequestID)
-	mux.Use(middleware.RealIP)
-	if c.Debug {
+	s.applyMiddlewares(mux, middlewares)
+
+	if s.Debug {
 		mux.Use(middleware.Logger)
 	}
-	mux.Use(middleware.Recoverer)
-	mux.Use(c.SessionLoad)
-	//mux.Use(c.NoSurf)
-	mux.Use(c.CheckForMaintenanceMode)
 
 	return mux
 }

@@ -1,25 +1,27 @@
 package socle
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"log"
 	"net/http"
 	"os"
 	"time"
 )
 
-func (c *Socle) ListenAndServe(addr string) error {
-	log.Printf("App start with url  %v", addr)
+func (s *Socle) ListenAndServe() error {
+
 	srv := &http.Server{
-		Addr:         addr,
-		ErrorLog:     c.Log.ErrorLog,
-		Handler:      c.Routes,
+		Addr:         s.Server.getURL(),
+		ErrorLog:     s.Log.ErrorLog,
+		Handler:      s.Routes,
 		IdleTimeout:  30 * time.Second,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 600 * time.Second,
 	}
 
-	if c.DB.Pool != nil {
-		defer c.DB.Pool.Close()
+	if s.DB.Pool != nil {
+		defer s.DB.Pool.Close()
 	}
 
 	if redisPool != nil {
@@ -30,7 +32,32 @@ func (c *Socle) ListenAndServe(addr string) error {
 		defer badgerConn.Close()
 	}
 
-	go c.listenRPC()
-	c.Log.InfoLog.Printf("Listening on port %s", os.Getenv("PORT"))
+	go s.listenRPC()
+	s.Log.InfoLog.Printf("Listening on  %s with security %v", s.Server.getURL(), s.Server.Secure)
+	if s.Server.Secure {
+		s.Log.InfoLog.Println("Begin TLS  Security")
+		if s.Server.Security.Strategy == "self" {
+			srv.TLSConfig = &tls.Config{
+				MinVersion: tls.VersionTLS13,
+			}
+			caBytes, err := os.ReadFile(s.Server.Security.CAName + ".crt")
+			if err != nil {
+				log.Fatal(err)
+			}
+			ca := x509.NewCertPool()
+			if !ca.AppendCertsFromPEM(caBytes) {
+				log.Fatal("CA cert not valid")
+			}
+			srv.TLSConfig.ClientCAs = ca
+
+			if s.Server.Security.MutualTLS {
+				srv.TLSConfig.ClientAuth = tls.RequireAndVerifyClientCert
+
+			}
+		}
+
+		return srv.ListenAndServeTLS(s.Server.Security.ServerCertName+".crt", s.Server.Security.ServerCertName+".key")
+	}
+	s.Log.InfoLog.Println("Skip TLS  Security")
 	return srv.ListenAndServe()
 }

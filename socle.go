@@ -1,7 +1,6 @@
 package socle
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/rpc"
@@ -16,6 +15,7 @@ import (
 	"github.com/socle-framework/mailer"
 	"github.com/socle-framework/render"
 	"github.com/socle-framework/session"
+	"github.com/socle-framework/socle/pkg/auth"
 	"github.com/socle-framework/socle/pkg/env"
 )
 
@@ -29,14 +29,23 @@ var maintenanceMode bool
 
 // New reads the .env file, creates our application config, populates the Socle type with settings
 // based on .env values, and creates necessary folders and files if they don't exist
-func (s *Socle) New(rootPath, cmd string) error {
-	s.cmd = cmd
+func (s *Socle) New(rootPath, entry string) error {
+	s.entry = entry
 	// Load .env
 	err := env.Load(rootPath)
 	if err != nil {
 		return err
 	}
 	s.env = initEnvConfig()
+
+	//load socle.yaml
+	appConfig, err := LoadAppConfig(rootPath)
+	if err != nil {
+		return err
+	}
+
+	s.appConfig = *appConfig
+
 	s.Debug = s.env.debug
 	s.EncryptionKey = s.env.encryptionKey
 	s.Version = version
@@ -55,9 +64,11 @@ func (s *Socle) New(rootPath, cmd string) error {
 	}
 
 	// connect to database
-	err = s.initDB()
-	if err != nil {
-		return err
+	if s.appConfig.Store.Enabled {
+		err = s.initDB()
+		if err != nil {
+			return err
+		}
 	}
 
 	// config scheduler
@@ -97,20 +108,35 @@ func (s *Socle) New(rootPath, cmd string) error {
 	}
 	go s.Mail.ListenForMail()
 
+	//init auth
+	err = s.initAuthentificator()
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
 func (s *Socle) initLoggers() error {
-	s.Log.InfoLog = log.New(os.Stdout, "INFO\t", log.Ldate|log.Ltime)
-	s.Log.ErrorLog = log.New(os.Stdout, "ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
+	s.Log.InfoLog = log.New(os.Stdout, s.entry+" INFO\t", log.Ldate|log.Ltime)
+	s.Log.ErrorLog = log.New(os.Stdout, s.entry+" ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
 	return nil
 }
 
 func (s *Socle) initRouter() error {
-	if !InArrayStr(s.cmd, []string{"web", "api"}) {
+	if !InArrayStr(s.entry, []string{"web", "api/rest"}) {
 		return nil
 	}
-	s.Routes = s.routes().(*chi.Mux)
+	var middlewares []string
+	switch s.entry {
+	case "api/rest":
+		middlewares = s.appConfig.Entries.Api.Middlewares
+
+	default:
+		middlewares = s.appConfig.Entries.Web.Middlewares
+	}
+	s.Server.Middlewares = middlewares
+	s.Routes = s.routes(middlewares).(*chi.Mux)
 	return nil
 }
 
@@ -221,42 +247,52 @@ func (s *Socle) initMailer() error {
 }
 
 func (s *Socle) initServer() error {
-
-	if !InArrayStr(s.cmd, []string{"web", "api", "rpc"}) {
+	if !InArrayStr(s.entry, []string{"web", "api/rest"}) {
 		return nil
 	}
 
 	s.Server = Server{
-		ServerName: s.env.serverName,
-		Secure:     s.env.secure,
+		Name:    s.env.serverName,
+		Address: s.env.serverAddress,
 	}
-	switch s.cmd {
-	case "api":
-		s.Server.Port = s.env.apiPort
+	switch s.entry {
+	case "api/rest":
+		s.Server.Port = s.env.restApiPort
+		s.Server.Secure = s.appConfig.Entries.Api.Security.Enabled
+		s.Server.Security.Strategy = s.appConfig.Entries.Api.Security.TLS.Strategy
+		s.Server.Security.MutualTLS = s.appConfig.Entries.Api.Security.TLS.Mutual
+		s.Server.Security.CAName = s.appConfig.Entries.Api.Security.TLS.CACertName
+		s.Server.Security.ServerCertName = s.appConfig.Entries.Api.Security.TLS.ServerCertName
+		s.Server.Security.ClientCertName = s.appConfig.Entries.Api.Security.TLS.ClientCertName
 
-	case "rpc":
-		s.Server.Port = s.env.rpcPort
 	default:
 		s.Server.Port = s.env.webPort
+		s.Server.Secure = s.appConfig.Entries.Web.Security.Enabled
+		s.Server.Security.Strategy = s.appConfig.Entries.Web.Security.TLS.Strategy
+		s.Server.Security.MutualTLS = s.appConfig.Entries.Web.Security.TLS.Mutual
+		s.Server.Security.CAName = s.appConfig.Entries.Web.Security.TLS.CACertName
+		s.Server.Security.ServerCertName = s.appConfig.Entries.Web.Security.TLS.ServerCertName
+		s.Server.Security.ClientCertName = s.appConfig.Entries.Web.Security.TLS.ClientCertName
 	}
-	s.Server.URL = fmt.Sprintf("%s:%s", s.env.serverName, s.Server.Port)
 	return nil
 
 }
 
 func (s *Socle) InitSession() error {
-	if s.cmd != "web" {
-		return nil
-	}
+	// if s.entry != "web" {
+	// 	return nil
+	// }
 
 	sess := session.Session{
 		CookieLifetime: s.env.cookie.lifetime,
 		CookiePersist:  s.env.cookie.persist,
 		CookieName:     s.env.cookie.name,
 		SessionType:    s.env.sessionType,
-		CookieDomain:   s.env.cookie.domain,
 	}
 
+	if s.env.cookie.domain != "" {
+		sess.CookieDomain = s.env.cookie.domain
+	}
 	switch s.env.sessionType {
 	case "redis":
 		sess.RedisPool = redisCache.Conn
@@ -269,14 +305,43 @@ func (s *Socle) InitSession() error {
 }
 
 func (s *Socle) initRenderer() error {
-	if s.cmd != "web" {
+	if s.entry != "web" {
 		return nil
 	}
 
-	s.Render = &render.Render{
-		RootPath: s.RootPath,
-		Session:  s.Session,
+	switch s.appConfig.Entries.Web.Render {
+	case "templ":
+		rd := &render.TemplRender{}
+		rd.RootPath = s.RootPath
+		rd.Session = s.Session
+		s.Render = rd
+
+	// 		s.Render = &render.Render{
+	// 	Renderer: s.appConfig.Entries.Web.Render,
+	// 	RootPath: s.RootPath,
+	// 	Session:  s.Session,
+	// }
+	case "jet":
+		rd := &render.JetRender{}
+		rd.RootPath = s.RootPath
+		rd.Session = s.Session
+		s.Render = rd
+	default:
+
 	}
+	return nil
+}
+
+func (s *Socle) initAuthentificator() error {
+	if s.entry != "api/rest" {
+		return nil
+	}
+
+	s.Authenticator = auth.NewJWTAuthenticator(
+		s.env.auth.token.secret,
+		s.env.auth.token.iss,
+		s.env.auth.token.iss,
+	)
 
 	return nil
 }

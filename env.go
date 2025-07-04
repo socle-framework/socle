@@ -12,26 +12,28 @@ import (
 )
 
 type envConfig struct {
-	appName       string
-	mode          string
-	debug         bool
-	webPort       string
-	apiPort       string
-	rpcPort       string
-	serverName    string
-	secure        bool
-	db            dbConfig
-	auth          authConfig
-	redis         redisConfig
-	cache         string
-	cookie        cookieConfig
-	sessionType   string
-	mail          mailConfig
-	migrationUrl  string
-	rateLimiter   ratelimiter.Config
-	uploads       uploadConfig
-	encryptionKey string
-	storage       storageConfig
+	mode           string
+	debug          bool
+	apiPort        string
+	restApiPort    string
+	graphQLApiPort string
+	rpcApiPort     string
+	webPort        string
+	serverName     string
+	serverAddress  string
+	secure         bool
+	db             dbConfig
+	auth           authConfig
+	redis          redisConfig
+	cache          string
+	cookie         cookieConfig
+	sessionType    string
+	mail           mailConfig
+	migrationUrl   string
+	rateLimiter    ratelimiter.Config
+	uploads        uploadConfig
+	encryptionKey  string
+	storage        storageConfig
 }
 
 type authConfig struct {
@@ -164,19 +166,19 @@ func initEnvConfig() envConfig {
 	} else {
 		maxUploadSize = int64(max)
 	}
-
 	return envConfig{
-		appName:      env.GetString("APP_NAME", ""),
-		mode:         env.GetString("MODE", "dev"),
-		debug:        env.GetBool("DEBUG", true),
-		webPort:      env.GetString("WEB_PORT", "8090"),
-		apiPort:      env.GetString("API_PORT", "8091"),
-		rpcPort:      env.GetString("RPC_PORT", "8092"),
-		serverName:   env.GetString("SERVER_NAME", "localhost"),
-		secure:       env.GetBool("SECURE", false),
-		cache:        env.GetString("CACHE", "memory"),
-		sessionType:  env.GetString("SESSION_TYPE", "cookie"),
-		migrationUrl: env.GetString("MIGRATION_URL", "file://migrate/migration"),
+		mode:           env.GetString("MODE", "dev"),
+		debug:          env.GetBool("DEBUG", true),
+		apiPort:        env.GetString("API_PORT", "8090"),
+		restApiPort:    env.GetString("REST_API_PORT", "8091"),
+		graphQLApiPort: env.GetString("GRAPHQL_API_PORT", "8092"),
+		rpcApiPort:     env.GetString("RPC_API_PORT", "8093"),
+		webPort:        env.GetString("WEB_PORT", "8190"),
+		serverName:     env.GetString("SERVER_NAME", "localhost"),
+		secure:         env.GetBool("SECURE", false),
+		cache:          env.GetString("CACHE", "memory"),
+		sessionType:    env.GetString("SESSION_TYPE", "cookie"),
+		migrationUrl:   env.GetString("MIGRATION_URL", "file://migrate/migration"),
 		db: dbConfig{
 			dbType:       env.GetString("DATABASE_TYPE", "postgres"),
 			host:         env.GetString("DATABASE_HOST", "localhost"),
@@ -203,7 +205,7 @@ func initEnvConfig() envConfig {
 			lifetime: env.GetString("COOKIE_LIFETIME", "24h"),
 			persist:  env.GetString("COOKIE_PERSIST", "true"),
 			secure:   env.GetString("COOKIE_SECURE", "false"),
-			domain:   env.GetString("COOKIE_DOMAIN", "localhost"),
+			domain:   env.GetString("COOKIE_DOMAIN", ""),
 		},
 
 		mail: mailConfig{
@@ -230,7 +232,7 @@ func initEnvConfig() envConfig {
 			},
 			token: tokenConfig{
 				secret:  env.GetString("AUTH_TOKEN_SECRET", ""),
-				exp:     time.Hour * time.Duration(env.GetInt("AUTH_TOKEN_EXP", 72)),     // 1 day
+				exp:     time.Hour * time.Duration(env.GetInt("AUTH_TOKEN_EXP", 24)),     // 1 day
 				refresh: time.Hour * time.Duration(env.GetInt("AUTH_TOKEN_REFRESH", 72)), // 3 days
 				iss:     env.GetString("AUTH_TOKEN_ISS", "app"),
 			},

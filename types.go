@@ -2,6 +2,7 @@ package socle
 
 import (
 	"database/sql"
+	"fmt"
 
 	"github.com/alexedwards/scs/v2"
 	"github.com/go-chi/chi/v5"
@@ -17,25 +18,26 @@ import (
 // Socle is the overall type for the Socle package. Members that are exported in this type
 // are available to any application that uses it.
 type Socle struct {
+	appConfig     appConfig
 	env           envConfig
-	cmd           string
+	entry         string
 	AppName       string
 	Version       string
 	Debug         bool
 	RootPath      string
 	Log           Logger
 	Routes        *chi.Mux
-	Render        *render.Render
+	Render        render.Render
 	Session       *scs.SessionManager
 	EncryptionKey string
 	Cache         cache.Cache
 	DB            Database
-	authenticator *auth.Authenticator
+	Authenticator auth.Authenticator
 	Server        Server
 	Scheduler     *cron.Cron
 	Mail          mailer.Mail
 	FileSystem    filesystems.FS
-	rateLimiter   *ratelimiter.Limiter
+	RateLimiter   *ratelimiter.Limiter
 }
 
 type Database struct {
@@ -44,8 +46,22 @@ type Database struct {
 }
 
 type Server struct {
-	ServerName string
-	Port       string
-	Secure     bool
-	URL        string
+	Name        string
+	Address     string
+	Port        string
+	Secure      bool
+	Security    ServerSecurity
+	Middlewares []string
+}
+
+type ServerSecurity struct {
+	Strategy       string
+	MutualTLS      bool
+	CAName         string
+	ServerCertName string
+	ClientCertName string
+}
+
+func (s Server) getURL() string {
+	return fmt.Sprintf("%s:%s", s.Name, s.Port)
 }

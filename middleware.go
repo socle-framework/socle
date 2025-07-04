@@ -6,19 +6,48 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/justinas/nosurf"
 )
 
-func (s *Socle) SessionLoad(next http.Handler) http.Handler {
+func (s *Socle) middlewareRegistry() map[string]func(http.Handler) http.Handler {
+	return map[string]func(http.Handler) http.Handler{
+		"request_id":             middleware.RequestID,
+		"real_ip":                middleware.RealIP,
+		"recovery":               middleware.Recoverer,
+		"session":                s.SessionLoadMiddleware,
+		"no_surf":                s.NoSurfMiddleware, // CSRF protection
+		"maintenance_mode_check": s.MaintenanceModeCheckMiddleware,
+
+		//"auth":       s.AuthMiddleware,
+		//"healthcheck": s.HealthCheckMiddleware,
+	}
+}
+
+func (s *Socle) applyMiddlewares(r chi.Router, names []string) {
+	registry := s.middlewareRegistry()
+
+	for _, name := range names {
+		if mw, ok := registry[name]; ok {
+			r.Use(mw)
+		} else {
+			fmt.Printf("Middleware '%s' not found in registry\n", name)
+		}
+	}
+}
+
+func (s *Socle) SessionLoadMiddleware(next http.Handler) http.Handler {
+	s.Log.InfoLog.Println("SessionLoad callled")
 	return s.Session.LoadAndSave(next)
 }
 
-func (s *Socle) NoSurf(next http.Handler) http.Handler {
+func (s *Socle) NoSurfMiddleware(next http.Handler) http.Handler {
+	s.Log.InfoLog.Println("No surf middleware callled")
 	csrfHandler := nosurf.New(next)
 	secure, _ := strconv.ParseBool(s.env.cookie.secure)
 
 	csrfHandler.ExemptGlob("/api/*")
-
 	csrfHandler.SetBaseCookie(http.Cookie{
 		HttpOnly: true,
 		Path:     "/",
@@ -30,7 +59,7 @@ func (s *Socle) NoSurf(next http.Handler) http.Handler {
 	return csrfHandler
 }
 
-func (s *Socle) CheckForMaintenanceMode(next http.Handler) http.Handler {
+func (s *Socle) MaintenanceModeCheckMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if maintenanceMode {
 			if !strings.Contains(r.URL.Path, "/public/maintenance.html") {
